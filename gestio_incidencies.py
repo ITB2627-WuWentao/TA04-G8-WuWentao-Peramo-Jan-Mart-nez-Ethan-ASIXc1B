@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+TA04 - Gestió d'incidències (grup G8)
+=====================================
+Flujo completo en un solo programa (solo librería estándar, Python 3.8+):
+
+  PASO 1  incidencies.csv  ->  incidencies.xml   (XML indentado, "bonito")
+  PASO 2  lee incidencies.xml y FILTRA datos erróneos o inútiles
+  PASO 3  muestra la información y estadísticas por pantalla (colores y tabuladores)
+  PASO 4  guarda en incidencies.json (si existe, pregunta: sobrescribir / añadir nuevas)
+
+Uso:
+    python3 gestio_incidencies.py
+    python3 gestio_incidencies.py --csv otro.csv --xml otro.xml --json otro.json
+    python3 gestio_incidencies.py --sin-color
+    python3 gestio_incidencies.py --no-convertir      (usa el XML que ya existe)
+    python3 gestio_incidencies.py --solo-xml          (solo CSV -> XML, y termina)
+
+El CSV puede tener las cabeceras limpias (id, data, reportat_per, ...) o las cabeceras
+originales de Google Forms/Sheets (el programa las reconoce por palabras clave).
+"""
+import argparse
+import csv
+import json
+import os
+import sys
+import unicodedata
+import xml.etree.ElementTree as ET
+from collections import Counter, defaultdict
+from datetime import date, datetime
+from statistics import mean
+import re
+
+# ============================================================================
+# CONFIGURACIÓN (edita aquí si cambias algo en el formulario)
+# ============================================================================
+GRUP = "G8"
+FECHA_MIN = date(2026, 10, 1)
+FECHA_MAX = date(2026, 10, 31)
+DESC_MIN = 10          # nº mínimo de caracteres de la descripción
+
+CAMPOS = ["id", "data", "reportat_per", "departament", "planta", "equip",
+          "tipus", "prioritat", "descripcio", "usuaris_afectats", "causa"]
+
+DEPARTAMENTS = {"Informàtica", "Administració", "Docència", "Direcció"}
+PLANTA_RE = re.compile(r"^(Pis|Piso|Planta) [1-4]$")     # "Pis 1", "Piso 1" o "Planta 1"
+USUARIS = ["Només 1", "Entre 2 i 5", "Entre 6 i 20", "Més de 20"]
+
+# Todas las variantes aceptadas de "error de usuario" (para no depender del apóstrofo)
+VARIANTS_ERROR_USUARI = {"Error de usuari", "Error de l'usuari", "Error de l’usuari",
+                         "Error d'usuari", "Error d’usuari", "Error humà"}
+EU = "ERROR_USUARI"   # clave interna
+
+# Reglas de coherencia (las mismas que usa el generador de respuestas)
+EQUIP_TIPUS = {
+    "Ordinador":  {"Maquinari", "Programari", "Xarxa"},
+    "Impressora": {"Maquinari", "Programari", "Xarxa"},
+    "Projector":  {"Maquinari", "Programari", "Audiovisual"},
+    "Switch":     {"Xarxa", "Maquinari"},
+    "Càmera":     {"Maquinari", "Xarxa", "Programari", "Audiovisual"},
+}
+TIPUS_CAUSA = {
+    "Maquinari":   {EU, "Desgast o avaria de maquinari", "Problema de xarxa o corrent elèctric", "Desconeguda"},
+    "Xarxa":       {EU, "Error de configuració", "Problema de xarxa o corrent elèctric", "Desconeguda"},
+    "Programari":  {EU, "Error de configuració", "Actualització o instal·lació de programari",
+                    "Virus o atac informàtic", "Desconeguda"},
+    "Audiovisual": {EU, "Desgast o avaria de maquinari", "Error de configuració",
+                    "Problema de xarxa o corrent elèctric", "Desconeguda"},
+}
+CAUSES_VALIDES = set().union(*TIPUS_CAUSA.values())
+
+# Nombres "basura" típicos de teclado
+NOMBRES_BASURA = ("asdf", "qwer", "xxxx", "aaaa", "test", "prova", "zzzz")
+NOMBRE_RE = re.compile(r"^[A-Za-zÀ-ÿ·'’\- ]{3,}$")
+
+DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+
+# ============================================================================
+# COLORES (ANSI)
+# ============================================================================
+class Color:
+    activo = True
+
+
+def _c(txt, codigo):
+    return f"\033[{codigo}m{txt}\033[0m" if Color.activo else str(txt)
+
+
+def negrita(t): return _c(t, "1")
+def gris(t):    return _c(t, "90")
+def rojo(t):    return _c(t, "91")
+def verde(t):   return _c(t, "92")
+def amarillo(t): return _c(t, "93")
+def azul(t):    return _c(t, "94")
+def magenta(t): return _c(t, "95")
+def cian(t):    return _c(t, "96")
+
+
+def color_prioridad(p):
+    """Rojo si es crítica (>=8), amarillo si media (5-7), verde si baja."""
+    return rojo if p >= 8 else amarillo if p >= 5 else verde
+
+
+def titulo(texto):
+    print()
+    print(cian(negrita(f"▌ {texto}")))
+    print(gris("\t" + "─" * 60))
+
+
+def paso(num, texto):
+    print()
+    print(magenta(negrita(f"══ PASO {num}: {texto} ══")))
+
+
+# ============================================================================
+# PASO 1: CSV -> XML
+# ============================================================================
+def norm(s):
+    """Minúsculas y sin acentos, para comparar cabeceras."""
+    s = unicodedata.normalize("NFD", s)
+    return "".join(ch for ch in s if unicodedata.category(ch) != "Mn").lower().strip()
+
+
+# palabra clave en la cabecera original de Google Forms -> campo del CSV limpio
+CLAVES = [("reporta", "reportat_per"), ("departament", "departament"), ("troba", "planta"),
+          ("planta", "planta"), ("equip", "equip"), ("tipus", "tipus"),
+          ("prioritat", "prioritat"), ("descriu", "descripcio"), ("usuaris", "usuaris_afectats"),
+          ("causa", "causa"), ("data", "data")]
+
+
+def mapear_cabecera(cab):
+    n = norm(cab)
+    if n in CAMPOS:
+        return n
+    if n in ("id", "identificador"):
+        return "id"
+    if "marca de temps" in n or "marca temporal" in n or "timestamp" in n:
+        return None
+    for clave, campo in CLAVES:
+        if clave in n:
+            return campo
+    return None
+
+
+def indentar(elem, nivel=0):
+    """Indenta el árbol XML (2 espacios por nivel) para que quede 'bonito'."""
+    i = "\n" + nivel * "  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + "  "
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+        for hijo in elem:
+            indentar(hijo, nivel + 1)
+        if not hijo.tail or not hijo.tail.strip():
+            hijo.tail = i
+    elif nivel and (not elem.tail or not elem.tail.strip()):
+        elem.tail = i
+
+
+def csv_a_xml(ruta_csv, ruta_xml):
+    """Convierte el CSV a XML: <incidencies><incidencia id="..."><campo>valor</campo>..."""
+    with open(ruta_csv, newline="", encoding="utf-8-sig") as f:
+        primera = f.readline()
+        f.seek(0)
+        delim = max(",;\t", key=primera.count)           # coma, punto y coma o tab
+        lector = csv.reader(f, delimiter=delim)
+        cabecera = next(lector)
+        mapa = {}
+        for i, h in enumerate(cabecera):
+            campo = mapear_cabecera(h)
+            if campo and campo not in mapa:
+                mapa[campo] = i
+        faltan = [c for c in CAMPOS if c != "id" and c not in mapa]
+        if faltan:
+            raise ValueError("Faltan columnas en el CSV: " + ", ".join(faltan))
+
+        raiz = ET.Element("incidencies")
+        n = 0
+        for fila in lector:
+            if not any(x.strip() for x in fila):
+                continue                                  # fila vacía
+            n += 1
+
+            def val(campo):
+                i = mapa.get(campo)
+                return fila[i].strip() if i is not None and i < len(fila) else ""
+
+            id_ = val("id") or f"{GRUP}-{n:04d}"          # si no hay ID, se genera
+            inc = ET.SubElement(raiz, "incidencia", id=id_)
+            for campo in CAMPOS[1:]:
+                ET.SubElement(inc, campo).text = val(campo)
+
+    indentar(raiz)
+    ET.ElementTree(raiz).write(ruta_xml, encoding="utf-8", xml_declaration=True)
+    return n
+
+
+# ============================================================================
+# PASO 2: leer XML y filtrar
+# ============================================================================
+def leer_xml(ruta):
+    raiz = ET.parse(ruta).getroot()
+    incidencias = []
+    for e in raiz.findall("incidencia"):
+        d = {"id": (e.get("id") or "").strip()}
+        for campo in CAMPOS[1:]:
+            d[campo] = (e.findtext(campo) or "").strip()
+        incidencias.append(d)
+    return incidencias
+
+
+def parse_fecha(texto):
+    """Acepta AAAA-MM-DD, DD/MM/AAAA y MM/DD/AAAA. Si hay ambigüedad (05/10/2026),
+    se prefiere la interpretación que cae dentro del rango válido."""
+    if not texto:
+        return None
+    token = texto.split()[0]
+    candidatas = []
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y"):
+        try:
+            candidatas.append(datetime.strptime(token, fmt).date())
+        except ValueError:
+            pass
+    for d in candidatas:
+        if FECHA_MIN <= d <= FECHA_MAX:
+            return d
+    return candidatas[0] if candidatas else None
+
+
+def clave_causa(causa):
+    return EU if causa in VARIANTS_ERROR_USUARI else causa
+
+
+def validar(inc, ids_validos):
+    """Devuelve (incidencia_normalizada | None, [motivos de descarte])."""
+    motivos = []
+
+    if not inc["id"]:
+        motivos.append("ID vacío")
+
+    fecha = parse_fecha(inc["data"])
+    if fecha is None:
+        motivos.append("Fecha no válida")
+    elif not (FECHA_MIN <= fecha <= FECHA_MAX):
+        motivos.append(f"Fecha fuera de rango ({fecha.year})" if fecha.year != FECHA_MIN.year
+                       else "Fecha fuera de octubre de 2026")
+
+    rep = inc["reportat_per"]
+    if not NOMBRE_RE.match(rep) or any(b in norm(rep) for b in NOMBRES_BASURA):
+        motivos.append("Nombre de quien reporta no válido")
+
+    if inc["departament"] not in DEPARTAMENTS:
+        motivos.append("Departamento fuera de la lista")
+    if not PLANTA_RE.match(inc["planta"]):
+        motivos.append("Planta fuera de la lista")
+
+    equip_ok = inc["equip"] in EQUIP_TIPUS
+    tipus_ok = inc["tipus"] in TIPUS_CAUSA
+    causa_ok = clave_causa(inc["causa"]) in CAUSES_VALIDES
+    if not equip_ok:
+        motivos.append("Equipo fuera de la lista")
+    if not tipus_ok:
+        motivos.append("Tipo fuera de la lista")
+    if not causa_ok:
+        motivos.append("Causa fuera de la lista")
+
+    try:
+        prio = int(inc["prioritat"])
+        if not 1 <= prio <= 10:
+            motivos.append("Prioridad fuera de 1-10")
+    except ValueError:
+        prio = None
+        motivos.append("Prioridad no numérica")
+
+    if len(inc["descripcio"]) < DESC_MIN:
+        motivos.append("Descripción vacía o demasiado corta")
+
+    if inc["usuaris_afectats"] not in USUARIS:
+        motivos.append("Usuarios afectados fuera de la lista")
+
+    # Coherencia entre campos (solo si cada campo es válido por separado)
+    if equip_ok and tipus_ok and inc["tipus"] not in EQUIP_TIPUS[inc["equip"]]:
+        motivos.append("Combinación incoherente (equipo/tipo)")
+    elif tipus_ok and causa_ok and clave_causa(inc["causa"]) not in TIPUS_CAUSA[inc["tipus"]]:
+        motivos.append("Combinación incoherente (tipo/causa)")
+
+    if not motivos and inc["id"] in ids_validos:
+        motivos.append("ID duplicado")
+
+    if motivos:
+        return None, motivos
+
+    ids_validos.add(inc["id"])
+    limpia = dict(inc)
+    limpia["data"] = fecha.isoformat()
+    limpia["prioritat"] = prio
+    return limpia, []
+
+
+def filtrar(incidencias):
+    validas, descartadas = [], []
+    ids = set()
+    for inc in incidencias:
+        ok, motivos = validar(inc, ids)
+        if ok:
+            validas.append(ok)
+        else:
+            descartadas.append((inc, motivos))
+    return validas, descartadas
+
+
+# ============================================================================
+# PASO 3: mostrar información y estadísticas
+# ============================================================================
+def barra(n, maximo, ancho=28):
+    return "█" * max(1, round(ancho * n / maximo)) if n else ""
+
+
+def mostrar_conteo(texto, contador, total, color=azul, orden=None, ancho_k=18):
+    titulo(texto)
+    items = [(k, contador[k]) for k in orden if k in contador] if orden else contador.most_common()
+    maximo = max((n for _, n in items), default=1)
+    for k, n in items:
+        print(f"\t{k:<{ancho_k}}\t{n:>4}\t{100 * n / total:>5.1f}%\t{color(barra(n, maximo))}")
+
+
+def mostrar_descartadas(todas, descartadas):
+    titulo("DATOS DESCARTADOS (erróneos o inútiles)")
+    if not descartadas:
+        print(verde("\tNo se ha descartado ninguna incidencia."))
+        return
+    motivos = Counter(m for _, ms in descartadas for m in ms)
+    for m, n in motivos.most_common():
+        print(f"\t{rojo('✗')} {m:<46}\t{n:>4}")
+    print()
+    print(gris("\tEjemplos:"))
+    for inc, ms in descartadas[:12]:
+        print(f"\t{rojo(inc['id'] or '(sin id)'):<22}\t{'; '.join(ms)}")
+    if len(descartadas) > 12:
+        print(gris(f"\t… y {len(descartadas) - 12} más"))
+
+
+def mostrar_estadisticas(validas, todas_n):
+    total = len(validas)
+    if total == 0:
+        print(rojo("\nNo hay incidencias válidas para analizar."))
+        return
+
+    # ---- Resumen general
+    titulo("RESUMEN GENERAL")
+    prios = [i["prioritat"] for i in validas]
+    criticas = [i for i in validas if i["prioritat"] >= 8]
+    print(f"\tIncidencias leídas del XML\t\t{negrita(todas_n)}")
+    print(f"\tIncidencias válidas\t\t\t{verde(negrita(total))}\t({100 * total / todas_n:.1f}%)")
+    print(f"\tIncidencias descartadas\t\t\t{rojo(negrita(todas_n - total))}")
+    print(f"\tPrioridad media\t\t\t\t{negrita(f'{mean(prios):.2f}')} / 10")
+    print(f"\tIncidencias críticas (prioridad ≥ 8)\t{rojo(negrita(len(criticas)))}"
+          f"\t({100 * len(criticas) / total:.1f}%)")
+    grandes = sum(1 for i in validas if i["usuaris_afectats"] in ("Entre 6 i 20", "Més de 20"))
+    print(f"\tAfectan a más de 5 usuarios\t\t{amarillo(negrita(grandes))}\t({100 * grandes / total:.1f}%)")
+
+    # ---- Distribuciones
+    mostrar_conteo("POR DEPARTAMENTO", Counter(i["departament"] for i in validas), total, azul)
+    mostrar_conteo("POR EQUIPO", Counter(i["equip"] for i in validas), total, magenta)
+    mostrar_conteo("POR TIPO DE INCIDENCIA", Counter(i["tipus"] for i in validas), total, cian)
+    mostrar_conteo("POR PLANTA", Counter(i["planta"] for i in validas), total, azul)
+    mostrar_conteo("CAUSA PROBABLE", Counter(i["causa"] for i in validas), total, amarillo, ancho_k=44)
+    mostrar_conteo("USUARIOS AFECTADOS", Counter(i["usuaris_afectats"] for i in validas), total,
+                   rojo, orden=USUARIS)
+
+    # ---- Prioridad por departamento y críticas por equipo
+    titulo("PRIORIDAD MEDIA POR DEPARTAMENTO")
+    por_dep = defaultdict(list)
+    for i in validas:
+        por_dep[i["departament"]].append(i["prioritat"])
+    for dep, ps in sorted(por_dep.items(), key=lambda x: -mean(x[1])):
+        m = mean(ps)
+        print(f"\t{dep:<18}\t{color_prioridad(round(m))(f'{m:.2f}')}\t{color_prioridad(round(m))(barra(m, 10))}")
+
+    titulo("EQUIPOS CON MÁS INCIDENCIAS CRÍTICAS (≥ 8)")
+    crit_eq = Counter(i["equip"] for i in criticas)
+    if crit_eq:
+        mx = max(crit_eq.values())
+        for eq, n in crit_eq.most_common():
+            print(f"\t{eq:<18}\t{n:>4}\t{rojo(barra(n, mx))}")
+    else:
+        print(verde("\tNo hay incidencias críticas."))
+
+    # ---- Evolución temporal
+    titulo("EVOLUCIÓN EN EL TIEMPO")
+    por_dia = Counter(i["data"] for i in validas)
+    dia, n = por_dia.most_common(1)[0]
+    d = date.fromisoformat(dia)
+    print(f"\tDía con más incidencias\t{negrita(dia)} ({DIAS[d.weekday()]})\t{amarillo(n)}")
+    por_semana = Counter(date.fromisoformat(i["data"]).isocalendar()[1] for i in validas)
+    mx = max(por_semana.values())
+    for sem in sorted(por_semana):
+        print(f"\tSemana {sem:<12}\t{por_semana[sem]:>4}\t{verde(barra(por_semana[sem], mx))}")
+
+    # ---- Top 5 más críticas
+    titulo("TOP 5 INCIDENCIAS MÁS CRÍTICAS")
+    top = sorted(validas, key=lambda i: (-i["prioritat"], i["data"]))[:5]
+    for i in top:
+        col = color_prioridad(i["prioritat"])
+        print(f"\t{col(str(i['prioritat']).rjust(2))}\t{i['id']}\t{i['data']}\t{i['equip']:<11}\t"
+              f"{i['departament']:<14}\t{i['descripcio'][:55]}")
+
+
+# ============================================================================
+# PASO 4: guardar en JSON
+# ============================================================================
+def cargar_json(ruta):
+    """Devuelve la lista de incidencias del JSON, o None si el fichero no es válido."""
+    try:
+        with open(ruta, encoding="utf-8") as f:
+            datos = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if isinstance(datos, dict):
+        datos = datos.get("incidencies")
+    return datos if isinstance(datos, list) else None
+
+
+def escribir_json(ruta, lista):
+    with open(ruta, "w", encoding="utf-8") as f:
+        json.dump({"total": len(lista), "incidencies": lista}, f, ensure_ascii=False, indent=2)
+
+
+def guardar_json(validas, ruta):
+    if not os.path.exists(ruta):
+        escribir_json(ruta, validas)
+        print(verde(f"\t✔ {ruta} no existía: creado con {len(validas)} incidencias."))
+        return
+
+    existentes = cargar_json(ruta)
+    print(amarillo(f"\t⚠ El fichero {ruta} ya existe"
+                   + (f" ({len(existentes)} incidencias)." if existentes is not None
+                      else " pero no es un JSON válido (solo se puede sobrescribir).")))
+    print("\t  [a] Sobrescribirlo (borra lo anterior y escribe todas las incidencias de nuevo)")
+    print("\t  [b] Añadir solo las incidencias nuevas (sin repetir IDs)")
+    while True:
+        try:
+            r = input(cian("\t¿Qué quieres hacer? (a/b): ")).strip().lower()
+        except EOFError:
+            print(rojo("\n\tNo se ha podido leer la respuesta: no se guarda nada."))
+            return
+        if r == "a":
+            escribir_json(ruta, validas)
+            print(verde(f"\t✔ Sobrescrito: {len(validas)} incidencias."))
+            return
+        if r == "b":
+            if existentes is None:
+                print(rojo("\tEl JSON existente no es válido; elige la opción a."))
+                continue
+            ids = {i.get("id") for i in existentes}
+            nuevas = [i for i in validas if i["id"] not in ids]
+            escribir_json(ruta, existentes + nuevas)
+            print(verde(f"\t✔ Añadidas {len(nuevas)} incidencias nuevas"
+                        f" ({len(validas) - len(nuevas)} ya existían). Total: {len(existentes) + len(nuevas)}."))
+            return
+        print(rojo("\tOpción no válida: escribe a o b."))
+
+
+# ============================================================================
+# PROGRAMA PRINCIPAL
+# ============================================================================
+def main():
+    ap = argparse.ArgumentParser(description="TA04 - CSV -> XML -> filtro -> estadísticas -> JSON")
+    ap.add_argument("--csv", default="incidencies.csv")
+    ap.add_argument("--xml", default="incidencies.xml")
+    ap.add_argument("--json", default="incidencies.json")
+    ap.add_argument("--sin-color", action="store_true", help="desactiva los colores ANSI")
+    ap.add_argument("--no-convertir", action="store_true", help="no regenera el XML desde el CSV")
+    ap.add_argument("--solo-xml", action="store_true", help="solo convierte el CSV a XML y termina")
+    args = ap.parse_args()
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
+    if os.name == "nt":
+        os.system("")                                      # activa ANSI en la consola de Windows
+    Color.activo = bool(os.environ.get("FORCE_COLOR")) or (
+        sys.stdout.isatty() and not args.sin_color and not os.environ.get("NO_COLOR"))
+
+    print(negrita(cian(f"\n  TA04 · Gestió d'incidències · {GRUP}")))
+
+    # ---- PASO 1
+    paso(1, "CSV → XML")
+    if not args.no_convertir and os.path.exists(args.csv):
+        try:
+            n = csv_a_xml(args.csv, args.xml)
+        except (ValueError, OSError, csv.Error) as e:
+            sys.exit(rojo(f"\tError al convertir el CSV: {e}"))
+        print(verde(f"\t✔ {args.csv} → {args.xml}: {n} incidencias convertidas (XML indentado)."))
+    elif os.path.exists(args.xml):
+        print(amarillo(f"\t⚠ Se usa el XML existente ({args.xml}); no se ha convertido el CSV."))
+    else:
+        sys.exit(rojo(f"\tNo existe {args.csv} ni {args.xml}."))
+
+    if args.solo_xml:
+        print()
+        return
+
+    # ---- PASO 2
+    paso(2, "Leer el XML y filtrar datos erróneos")
+    try:
+        todas = leer_xml(args.xml)
+    except (ET.ParseError, OSError) as e:
+        sys.exit(rojo(f"\tEl XML no es válido: {e}"))
+    validas, descartadas = filtrar(todas)
+    print(f"\t{len(todas)} incidencias leídas → {verde(str(len(validas)))} válidas, "
+          f"{rojo(str(len(descartadas)))} descartadas.")
+    mostrar_descartadas(todas, descartadas)
+
+    # ---- PASO 3
+    paso(3, "Información y estadísticas")
+    mostrar_estadisticas(validas, len(todas))
+
+    # ---- PASO 4
+    paso(4, "Guardar en JSON")
+    guardar_json(validas, args.json)
+    print()
+
+
+if __name__ == "__main__":
+    main()
