@@ -1,0 +1,160 @@
+// Generador de respuestas para el formulario de incidencias G8 (octubre 2026)
+const N = 4000;          // total de respuestas que generará este script (se completa solo, por tandas)
+const ERROR_RATE = 0.10; // 0.10 = el 10% de las respuestas llevarán algún error a propósito
+
+const ERROR_USUARI = 'Error de usuari'; // debe ser IDÉNTICO a la opción del formulario
+
+const NOMBRES = ['Marta Puig','Joan Serra','Laia Ferrer','Pau Vidal','Núria Roca',
+  'Marc Soler','Anna Costa','Jordi Mas','Clara Pons','Oriol Vila',
+  'Sílvia Camps','Albert Riba','Mireia Font','Eric Martí','Judit Bosch'];
+
+const EQUIP_TIPUS = {
+  'Ordinador':  ['Maquinari','Programari','Xarxa'],
+  'Impressora': ['Maquinari','Programari','Xarxa'],
+  'Projector':  ['Maquinari','Programari'],
+  'Switch':     ['Xarxa','Maquinari'],
+  'Càmera':     ['Maquinari','Xarxa','Programari']
+};
+const TIPUS_CAUSA = {
+  'Maquinari': [ERROR_USUARI,'Desgast o avaria de maquinari','Problema de xarxa o corrent elèctric','Desconeguda'],
+  'Xarxa':     ['Error de configuració','Problema de xarxa o corrent elèctric','Desconeguda',ERROR_USUARI],
+  'Programari':[ERROR_USUARI,'Error de configuració','Actualització o instal·lació de programari','Virus o atac informàtic','Desconeguda']
+};
+const DESCR = {
+  'Ordinador':  ["L'ordinador no arrenca després d'apagar-lo ahir","El PC va molt lent i es bloqueja en obrir programes","Apareix una pantalla blava cada cop que s'inicia sessió"],
+  'Impressora': ["La impressora encasqueta el paper contínuament","No imprimeix cap document i la cua queda bloquejada","Les impressions surten amb ratlles i la tinta és molt clara"],
+  'Projector':  ["El projector no detecta cap senyal d'entrada","La imatge es veu amb taques i colors deformats","El projector s'apaga sol als pocs minuts d'encendre'l"],
+  'Switch':     ["El switch de la planta té llums vermelles i hi ha ports sense connexió","Es perd la xarxa de manera intermitent a tota l'aula","El switch es reinicia sol i talla la connexió cada poc"],
+  'Càmera':     ["La càmera de l'aula no envia imatge a la sala de control","La videoconferència no detecta la càmera connectada","La imatge de la càmera va a salts i amb molt retard"]
+};
+
+// Datos para las respuestas con errores
+const INCOHERENTS = [
+  ['Switch','Programari','Virus o atac informàtic'],
+  ['Projector','Xarxa','Desgast o avaria de maquinari'],
+  ['Impressora','Maquinari','Virus o atac informàtic'],
+  ['Ordinador','Maquinari','Actualització o instal·lació de programari'],
+  ['Càmera','Programari','Desgast o avaria de maquinari']
+];
+const DESCR_MALAS = ['.', 'asdf', 'aaa', 'no va', '???', 'x', 'ok'];
+const QUI_MALOS = ['asdfgh', '123', 'xxxx', 'qwerty', '???'];
+
+// ---------- Utilidades ----------
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function ri(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); }
+function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+
+function findItem(items, kw) {
+  const found = items.find(i => norm(i.getTitle()).includes(kw));
+  if (!found) throw new Error('No encuentro la pregunta con la palabra: ' + kw);
+  return found;
+}
+function choices(item) {
+  const t = item.getType();
+  if (t === FormApp.ItemType.LIST) return item.asListItem().getChoices().map(c => c.getValue());
+  if (t === FormApp.ItemType.MULTIPLE_CHOICE) return item.asMultipleChoiceItem().getChoices().map(c => c.getValue());
+  return [];
+}
+function resp(item, value) {
+  switch (item.getType()) {
+    case FormApp.ItemType.DATE: return item.asDateItem().createResponse(value);
+    case FormApp.ItemType.TEXT: return item.asTextItem().createResponse(value);
+    case FormApp.ItemType.PARAGRAPH_TEXT: return item.asParagraphTextItem().createResponse(value);
+    case FormApp.ItemType.LIST: return item.asListItem().createResponse(value);
+    case FormApp.ItemType.MULTIPLE_CHOICE: return item.asMultipleChoiceItem().createResponse(value);
+    case FormApp.ItemType.SCALE: return item.asScaleItem().createResponse(value);
+  }
+}
+function safe(item, wanted) {
+  const ch = choices(item);
+  if (ch.length === 0 || ch.includes(wanted)) return wanted;
+  Logger.log('NO COINCIDE: "' + wanted + '" no está en ' + item.getTitle());
+  return pick(ch);
+}
+function getItems_(form) {
+  const items = form.getItems();
+  return {
+    data: findItem(items, 'data'), qui: findItem(items, 'reporta'),
+    dep: findItem(items, 'departament'), planta: findItem(items, 'troba'),
+    equip: findItem(items, 'equip'), tipus: findItem(items, 'tipus'),
+    prio: findItem(items, 'prioritat'), desc: findItem(items, 'descriu'),
+    users: findItem(items, 'usuaris'), causa: findItem(items, 'causa')
+  };
+}
+
+// ---------- Crea UNA respuesta (normal o con error) ----------
+function crearUna_(form, it, esError) {
+  let equip = pick(Object.keys(EQUIP_TIPUS));
+  let tipus = pick(EQUIP_TIPUS[equip]);
+  let causa = pick(TIPUS_CAUSA[tipus]);
+  let fecha = new Date(2026, 9, ri(1, 29));
+  let qui = pick(NOMBRES);
+  let prio = Math.min(10, Math.max(1, Math.round((Math.random() + Math.random()) * 5.5)));
+  let descr = pick(DESCR[equip]) + '. Cal revisar-ho amb urgència.';
+
+  if (esError) {
+    switch (ri(0, 4)) {
+      case 0: fecha = new Date(pick([2064, 2019, 1999, 2030]), ri(0, 11), ri(1, 28)); break; // año imposible
+      case 1: fecha = new Date(2026, pick([6, 8, 10, 11]), ri(1, 28)); break;               // fuera de octubre
+      case 2: descr = pick(DESCR_MALAS); break;                                             // descripción inútil
+      case 3: qui = pick(QUI_MALOS); break;                                                 // nombre basura
+      case 4: {                                                                              // combinación incoherente
+        const combo = pick(INCOHERENTS);
+        equip = combo[0]; tipus = combo[1]; causa = combo[2];
+        descr = pick(DESCR[equip]) + '. Cal revisar-ho amb urgència.';
+        break;
+      }
+    }
+  }
+
+  const r = form.createResponse();
+  r.withItemResponse(resp(it.data, fecha));
+  r.withItemResponse(resp(it.qui, qui));
+  r.withItemResponse(resp(it.dep, pick(choices(it.dep))));
+  r.withItemResponse(resp(it.planta, pick(choices(it.planta))));
+  r.withItemResponse(resp(it.equip, safe(it.equip, equip)));
+  r.withItemResponse(resp(it.tipus, safe(it.tipus, tipus)));
+  r.withItemResponse(resp(it.prio, prio));
+  r.withItemResponse(resp(it.desc, descr));
+  r.withItemResponse(resp(it.users, pick(choices(it.users))));
+  r.withItemResponse(resp(it.causa, safe(it.causa, causa)));
+  r.submit();
+}
+
+// ---------- PRUEBA: crea 10 respuestas (la mitad con error). No toca el contador ----------
+function probar() {
+  const form = FormApp.getActiveForm();
+  const it = getItems_(form);
+  for (let i = 0; i < 10; i++) crearUna_(form, it, i % 2 === 1);
+  Logger.log('Prueba hecha: 10 respuestas (5 normales y 5 con error).');
+}
+
+// ---------- GENERACIÓN: se ejecuta por tandas hasta llegar a N ----------
+function generarRespuestas() {
+  const form = FormApp.getActiveForm();
+  const it = getItems_(form);
+  const props = PropertiesService.getScriptProperties();
+  let hechas = Number(props.getProperty('hechas') || 0);
+  const inici = Date.now();
+
+  while (hechas < N) {
+    if (Date.now() - inici > 240000) { Logger.log('Tanda terminada. Llevas ' + hechas + ' de ' + N + '.'); break; }
+    crearUna_(form, it, Math.random() < ERROR_RATE);
+    hechas++;
+    props.setProperty('hechas', hechas);
+  }
+  Logger.log('Total acumulado: ' + hechas + ' de ' + N);
+  if (hechas >= N) pararAutomatico();
+}
+
+// ---------- AUTOMÁTICO: ejecuta generarRespuestas cada 5 minutos ----------
+function iniciarAutomatico() {
+  pararAutomatico();
+  ScriptApp.newTrigger('generarRespuestas').timeBased().everyMinutes(5).create();
+}
+function pararAutomatico() {
+  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+// ---------- Reiniciar el contador (solo si quieres empezar la cuenta de cero) ----------
+function reiniciarContador() { PropertiesService.getScriptProperties().deleteProperty('hechas'); }

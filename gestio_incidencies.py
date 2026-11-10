@@ -3,41 +3,36 @@
 """
 TA04 - Gestió d'incidències (grup G8)
 =====================================
-Flujo completo en un solo programa (solo librería estándar, Python 3.8+):
+Programa basado en el XML (solo librería estándar, Python 3.8+):
 
-  PASO 1  incidencies.csv  ->  incidencies.xml   (XML indentado, "bonito")
-  PASO 2  lee incidencies.xml y FILTRA datos erróneos o inútiles
-  PASO 3  muestra la información y estadísticas por pantalla (colores y tabuladores)
-  PASO 4  guarda en incidencies.json (si existe, pregunta: sobrescribir / añadir nuevas)
+  PASO 1  lee incidencies.xml y FILTRA datos erróneos o inútiles
+  PASO 2  muestra la información y estadísticas por pantalla (colores y tabuladores)
+  PASO 3  guarda en incidencies.json (si existe, pregunta: sobrescribir / añadir nuevas)
+
+El XML se crea antes con csv_a_xml.py (incidencies.csv -> incidencies.xml).
 
 Uso:
     python3 gestio_incidencies.py
-    python3 gestio_incidencies.py --csv otro.csv --xml otro.xml --json otro.json
+    python3 gestio_incidencies.py --xml otro.xml --json otro.json
     python3 gestio_incidencies.py --sin-color
-    python3 gestio_incidencies.py --no-convertir      (usa el XML que ya existe)
-    python3 gestio_incidencies.py --solo-xml          (solo CSV -> XML, y termina)
-
-El CSV puede tener las cabeceras limpias (id, data, reportat_per, ...) o las cabeceras
-originales de Google Forms/Sheets (el programa las reconoce por palabras clave).
 """
 import argparse
-import csv
 import json
 import os
 import sys
 import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from statistics import mean
 import re
+import shutil
 
 # ============================================================================
 # CONFIGURACIÓN (edita aquí si cambias algo en el formulario)
 # ============================================================================
 GRUP = "G8"
-FECHA_MIN = date(2026, 10, 1)
-FECHA_MAX = date(2026, 10, 31)
+DIAS_ATRAS = 365       # una fecha es válida si no es futura ni tiene más de DIAS_ATRAS días
 DESC_MIN = 10          # nº mínimo de caracteres de la descripción
 
 CAMPOS = ["id", "data", "reportat_per", "departament", "planta", "equip",
@@ -73,6 +68,15 @@ CAUSES_VALIDES = set().union(*TIPUS_CAUSA.values())
 # Nombres "basura" típicos de teclado
 NOMBRES_BASURA = ("asdf", "qwer", "xxxx", "aaaa", "test", "prova", "zzzz")
 NOMBRE_RE = re.compile(r"^[A-Za-zÀ-ÿ·'’\- ]{3,}$")
+
+def fecha_max():
+    """Hoy (fecha actual del sistema, se recalcula cada vez que se ejecuta)."""
+    return date.today()
+
+
+def fecha_min():
+    return date.today() - timedelta(days=DIAS_ATRAS)
+
 
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
@@ -114,92 +118,30 @@ def paso(num, texto):
     print(magenta(negrita(f"══ PASO {num}: {texto} ══")))
 
 
+def cortar(texto, ancho):
+    texto = str(texto)
+    return texto if len(texto) <= ancho else texto[:max(1, ancho - 1)] + "…"
+
+
+def banner(texto):
+    linea = "═" * (len(texto) + 4)
+    print()
+    print(cian(negrita(f"  ╔{linea}╗")))
+    print(cian(negrita(f"  ║  {texto}  ║")))
+    print(cian(negrita(f"  ╚{linea}╝")))
+
+
 # ============================================================================
-# PASO 1: CSV -> XML
+# UTILIDADES
 # ============================================================================
 def norm(s):
-    """Minúsculas y sin acentos, para comparar cabeceras."""
+    """Minúsculas y sin acentos, para comparar textos."""
     s = unicodedata.normalize("NFD", s)
     return "".join(ch for ch in s if unicodedata.category(ch) != "Mn").lower().strip()
 
 
-# palabra clave en la cabecera original de Google Forms -> campo del CSV limpio
-CLAVES = [("reporta", "reportat_per"), ("departament", "departament"), ("troba", "planta"),
-          ("planta", "planta"), ("equip", "equip"), ("tipus", "tipus"),
-          ("prioritat", "prioritat"), ("descriu", "descripcio"), ("usuaris", "usuaris_afectats"),
-          ("causa", "causa"), ("data", "data")]
-
-
-def mapear_cabecera(cab):
-    n = norm(cab)
-    if n in CAMPOS:
-        return n
-    if n in ("id", "identificador"):
-        return "id"
-    if "marca de temps" in n or "marca temporal" in n or "timestamp" in n:
-        return None
-    for clave, campo in CLAVES:
-        if clave in n:
-            return campo
-    return None
-
-
-def indentar(elem, nivel=0):
-    """Indenta el árbol XML (2 espacios por nivel) para que quede 'bonito'."""
-    i = "\n" + nivel * "  "
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = i + "  "
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
-        for hijo in elem:
-            indentar(hijo, nivel + 1)
-        if not hijo.tail or not hijo.tail.strip():
-            hijo.tail = i
-    elif nivel and (not elem.tail or not elem.tail.strip()):
-        elem.tail = i
-
-
-def csv_a_xml(ruta_csv, ruta_xml):
-    """Convierte el CSV a XML: <incidencies><incidencia id="..."><campo>valor</campo>..."""
-    with open(ruta_csv, newline="", encoding="utf-8-sig") as f:
-        primera = f.readline()
-        f.seek(0)
-        delim = max(",;\t", key=primera.count)           # coma, punto y coma o tab
-        lector = csv.reader(f, delimiter=delim)
-        cabecera = next(lector)
-        mapa = {}
-        for i, h in enumerate(cabecera):
-            campo = mapear_cabecera(h)
-            if campo and campo not in mapa:
-                mapa[campo] = i
-        faltan = [c for c in CAMPOS if c != "id" and c not in mapa]
-        if faltan:
-            raise ValueError("Faltan columnas en el CSV: " + ", ".join(faltan))
-
-        raiz = ET.Element("incidencies")
-        n = 0
-        for fila in lector:
-            if not any(x.strip() for x in fila):
-                continue                                  # fila vacía
-            n += 1
-
-            def val(campo):
-                i = mapa.get(campo)
-                return fila[i].strip() if i is not None and i < len(fila) else ""
-
-            id_ = val("id") or f"{GRUP}-{n:04d}"          # si no hay ID, se genera
-            inc = ET.SubElement(raiz, "incidencia", id=id_)
-            for campo in CAMPOS[1:]:
-                ET.SubElement(inc, campo).text = val(campo)
-
-    indentar(raiz)
-    ET.ElementTree(raiz).write(ruta_xml, encoding="utf-8", xml_declaration=True)
-    return n
-
-
 # ============================================================================
-# PASO 2: leer XML y filtrar
+# PASO 1: leer XML y filtrar
 # ============================================================================
 def leer_xml(ruta):
     raiz = ET.parse(ruta).getroot()
@@ -225,7 +167,7 @@ def parse_fecha(texto):
         except ValueError:
             pass
     for d in candidatas:
-        if FECHA_MIN <= d <= FECHA_MAX:
+        if fecha_min() <= d <= fecha_max():
             return d
     return candidatas[0] if candidatas else None
 
@@ -244,9 +186,10 @@ def validar(inc, ids_validos):
     fecha = parse_fecha(inc["data"])
     if fecha is None:
         motivos.append("Fecha no válida")
-    elif not (FECHA_MIN <= fecha <= FECHA_MAX):
-        motivos.append(f"Fecha fuera de rango ({fecha.year})" if fecha.year != FECHA_MIN.year
-                       else "Fecha fuera de octubre de 2026")
+    elif fecha > fecha_max():
+        motivos.append("Fecha futura (posterior a hoy)")
+    elif fecha < fecha_min():
+        motivos.append(f"Fecha demasiado antigua (más de {DIAS_ATRAS} días)")
 
     rep = inc["reportat_per"]
     if not NOMBRE_RE.match(rep) or any(b in norm(rep) for b in NOMBRES_BASURA):
@@ -313,7 +256,7 @@ def filtrar(incidencias):
 
 
 # ============================================================================
-# PASO 3: mostrar información y estadísticas
+# PASO 2: mostrar información y estadísticas
 # ============================================================================
 def barra(n, maximo, ancho=28):
     return "█" * max(1, round(ancho * n / maximo)) if n else ""
@@ -341,6 +284,28 @@ def mostrar_descartadas(todas, descartadas):
         print(f"\t{rojo(inc['id'] or '(sin id)'):<22}\t{'; '.join(ms)}")
     if len(descartadas) > 12:
         print(gris(f"\t… y {len(descartadas) - 12} más"))
+
+
+def mostrar_tabla(validas, n=10):
+    """Tabla alineada con las primeras incidencias válidas (prioridad en color)."""
+    titulo(f"PRIMERAS {min(n, len(validas))} INCIDENCIAS VÁLIDAS")
+    if not validas:
+        return
+    ancho_term = shutil.get_terminal_size((110, 20)).columns
+    w = [8, 10, 17, 10, 11, 3]
+    resto = ancho_term - sum(w) - 2 * len(w) - 10
+    wd = max(20, min(resto, 60))
+    cab = ["ID", "Fecha", "Reporta", "Equipo", "Tipo", "Pri"]
+    print("\t" + negrita("  ".join(f"{c:<{x}}" for c, x in zip(cab, w)) + "  Descripción"))
+    print(gris("\t" + "─" * min(ancho_term - 10, sum(w) + 2 * len(w) + wd)))
+    for i in validas[:n]:
+        col = color_prioridad(i["prioritat"])
+        fila = [cortar(i["id"], w[0]), i["data"], cortar(i["reportat_per"], w[2]),
+                cortar(i["equip"], w[3]), cortar(i["tipus"], w[4])]
+        print("\t" + "  ".join(f"{c:<{x}}" for c, x in zip(fila, w)) + "  "
+              + col(f"{i['prioritat']:>3}") + "  " + cortar(i["descripcio"], wd))
+    if len(validas) > n:
+        print(gris(f"\t… y {len(validas) - n} más (todas se guardan en el JSON)"))
 
 
 def mostrar_estadisticas(validas, todas_n):
@@ -410,7 +375,7 @@ def mostrar_estadisticas(validas, todas_n):
 
 
 # ============================================================================
-# PASO 4: guardar en JSON
+# PASO 3: guardar en JSON
 # ============================================================================
 def cargar_json(ruta):
     """Devuelve la lista de incidencias del JSON, o None si el fichero no es válido."""
@@ -468,13 +433,10 @@ def guardar_json(validas, ruta):
 # PROGRAMA PRINCIPAL
 # ============================================================================
 def main():
-    ap = argparse.ArgumentParser(description="TA04 - CSV -> XML -> filtro -> estadísticas -> JSON")
-    ap.add_argument("--csv", default="incidencies.csv")
+    ap = argparse.ArgumentParser(description="TA04 - XML -> filtro -> estadísticas -> JSON")
     ap.add_argument("--xml", default="incidencies.xml")
     ap.add_argument("--json", default="incidencies.json")
     ap.add_argument("--sin-color", action="store_true", help="desactiva los colores ANSI")
-    ap.add_argument("--no-convertir", action="store_true", help="no regenera el XML desde el CSV")
-    ap.add_argument("--solo-xml", action="store_true", help="solo convierte el CSV a XML y termina")
     args = ap.parse_args()
 
     try:
@@ -486,45 +448,50 @@ def main():
     Color.activo = bool(os.environ.get("FORCE_COLOR")) or (
         sys.stdout.isatty() and not args.sin_color and not os.environ.get("NO_COLOR"))
 
-    print(negrita(cian(f"\n  TA04 · Gestió d'incidències · {GRUP}")))
+    banner(f"TA04 · Gestió d'incidències · {GRUP}")
+    print(gris(f"\tFecha actual: {fecha_max().isoformat()} "
+               f"(se aceptan fechas desde {fecha_min().isoformat()} hasta hoy)"))
 
     # ---- PASO 1
-    paso(1, "CSV → XML")
-    if not args.no_convertir and os.path.exists(args.csv):
-        try:
-            n = csv_a_xml(args.csv, args.xml)
-        except (ValueError, OSError, csv.Error) as e:
-            sys.exit(rojo(f"\tError al convertir el CSV: {e}"))
-        print(verde(f"\t✔ {args.csv} → {args.xml}: {n} incidencias convertidas (XML indentado)."))
-    elif os.path.exists(args.xml):
-        print(amarillo(f"\t⚠ Se usa el XML existente ({args.xml}); no se ha convertido el CSV."))
-    else:
-        sys.exit(rojo(f"\tNo existe {args.csv} ni {args.xml}."))
-
-    if args.solo_xml:
-        print()
-        return
-
-    # ---- PASO 2
-    paso(2, "Leer el XML y filtrar datos erróneos")
+    paso(1, "Leer el XML y filtrar datos erróneos")
+    if not os.path.exists(args.xml):
+        sys.exit(rojo(f"\tNo encuentro el fichero {args.xml}. Créalo antes con csv_a_xml.py."))
     try:
         todas = leer_xml(args.xml)
-    except (ET.ParseError, OSError) as e:
-        sys.exit(rojo(f"\tEl XML no es válido: {e}"))
+    except ET.ParseError as e:
+        linea = e.position[0] if getattr(e, "position", None) else "?"
+        sys.exit(rojo(f"\tEl fichero {args.xml} no es un XML válido (error cerca de la línea {linea})."))
+    except UnicodeDecodeError:
+        sys.exit(rojo(f"\tNo puedo leer {args.xml}: caracteres no válidos."))
+    except OSError:
+        sys.exit(rojo(f"\tNo puedo leer {args.xml}."))
+    if not todas:
+        sys.exit(rojo(f"\t{args.xml} no contiene ninguna incidencia."))
     validas, descartadas = filtrar(todas)
     print(f"\t{len(todas)} incidencias leídas → {verde(str(len(validas)))} válidas, "
           f"{rojo(str(len(descartadas)))} descartadas.")
+    ancho_b = 40
+    k = round(ancho_b * len(validas) / len(todas))
+    print("\t" + verde("█" * k) + rojo("█" * (ancho_b - k))
+          + gris(f"  {100 * len(validas) / len(todas):.1f}% válidas"))
     mostrar_descartadas(todas, descartadas)
 
-    # ---- PASO 3
-    paso(3, "Información y estadísticas")
+    # ---- PASO 2
+    paso(2, "Información y estadísticas")
+    mostrar_tabla(validas)
     mostrar_estadisticas(validas, len(todas))
 
-    # ---- PASO 4
-    paso(4, "Guardar en JSON")
-    guardar_json(validas, args.json)
+    # ---- PASO 3
+    paso(3, "Guardar en JSON")
+    try:
+        guardar_json(validas, args.json)
+    except OSError:
+        sys.exit(rojo(f"\tNo puedo escribir {args.json}."))
     print()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\n\tCancelado por el usuario.")
