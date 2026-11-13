@@ -10,13 +10,17 @@ Funciona igual en Windows, macOS y Linux.
   PASO 2  muestra la información y estadísticas en la TERMINAL (colores, tabuladores, barras)
   PASO 3  genera informe_incidencies.html: el mismo informe en versión gráfica
   PASO 4  guarda incidencies.json (si existe, pregunta: a = sobrescribir / b = añadir nuevas)
-  PASO 5  abre el informe en el navegador
+  PASO 5  pregunta cómo ver el informe gráfico:
+            1 = pantalla (se abre en el navegador de este ordenador)
+            2 = móvil   (muestra un código QR que lleva a la web en GitHub Pages)
+            3 = solo terminal
 
 El XML se crea antes con csv_a_xml.py (incidencies.csv -> incidencies.xml).
 
 Uso:
     python3 gestio_incidencies.py
-    python3 gestio_incidencies.py --no-abrir        (no abre el navegador)
+    python3 gestio_incidencies.py --no-abrir        (no pregunta ni abre nada al final)
+    python3 gestio_incidencies.py --url https://usuario.github.io/repo/TA04/informe_incidencies.html
     python3 gestio_incidencies.py --sin-web         (solo terminal, sin informe HTML)
     python3 gestio_incidencies.py --sin-color       (terminal sin colores)
     python3 gestio_incidencies.py --xml otro.xml --json otro.json --html otro.html
@@ -33,12 +37,18 @@ from statistics import mean
 import re
 import shutil
 import webbrowser
+import subprocess
+from urllib.parse import quote
 from pathlib import Path
 
 # ============================================================================
 # CONFIGURACIÓN (edita aquí si cambias algo en el formulario)
 # ============================================================================
 GRUP = "G8"
+# Dirección de la web en GitHub Pages. Si se deja vacía, se calcula sola a partir del repositorio git
+# (https://USUARIO.github.io/REPO/carpeta/informe_incidencies.html).
+URL_WEB = ""
+
 DIAS_ATRAS = 365       # una fecha es válida si no es futura ni tiene más de DIAS_ATRAS días
 DESC_MIN = 10          # nº mínimo de caracteres de la descripción
 
@@ -580,6 +590,7 @@ button.p:disabled{opacity:.4;cursor:default}
 .row .k i{display:block;height:100%;border-radius:4px}
 .row .n{color:var(--muted);text-align:right}
 @media (max-width:520px){.grid{grid-template-columns:1fr}}
+@media (max-width:640px){header,nav,main{padding-left:14px;padding-right:14px}h1{font-size:21px}nav button{padding:8px 12px}th,td{padding:6px 8px}td.d{min-width:200px}.card .v{font-size:24px}.row{grid-template-columns:minmax(90px,140px) 1fr 44px}}
 </style>
 </head>
 <body>
@@ -718,6 +729,281 @@ def generar_html(datos, ruta):
 # ----------------------------------------------------------------------------
 # Programa principal
 # ----------------------------------------------------------------------------
+# ============================================================================
+# CÓDIGO QR (generador propio: solo librería estándar, sin instalar nada)
+# Codificación en modo byte, corrección de errores nivel M, versiones 1-10.
+# ============================================================================
+_QR_ECC = [10, 16, 26, 18, 24, 16, 18, 22, 22, 26]      # codewords de corrección por bloque (nivel M)
+_QR_BLOQUES = [1, 1, 1, 2, 2, 4, 4, 4, 5, 5]            # número de bloques (nivel M)
+
+
+def _gf_mul(x, y):
+    z = 0
+    for i in reversed(range(8)):
+        z = (z << 1) ^ ((z >> 7) * 0x11D)
+        z ^= ((y >> i) & 1) * x
+    return z
+
+
+def _rs_divisor(grado):
+    r = [0] * (grado - 1) + [1]
+    raiz = 1
+    for _ in range(grado):
+        for j in range(len(r)):
+            r[j] = _gf_mul(r[j], raiz)
+            if j + 1 < len(r):
+                r[j] ^= r[j + 1]
+        raiz = _gf_mul(raiz, 0x02)
+    return r
+
+
+def _rs_resto(datos, divisor):
+    r = [0] * len(divisor)
+    for b in datos:
+        f = b ^ r.pop(0)
+        r.append(0)
+        for i, c in enumerate(divisor):
+            r[i] ^= _gf_mul(c, f)
+    return r
+
+
+def _modulos_datos(v):
+    r = (16 * v + 128) * v + 64
+    if v >= 2:
+        n = v // 7 + 2
+        r -= (25 * n - 10) * n - 55
+        if v >= 7:
+            r -= 36
+    return r
+
+
+def generar_qr(texto):
+    """Devuelve la matriz (lista de listas de bool, True = negro) del código QR."""
+    datos = texto.encode("utf-8")
+    for v in range(1, 11):
+        capacidad = _modulos_datos(v) // 8 - _QR_ECC[v - 1] * _QR_BLOQUES[v - 1]
+        bits_cont = 8 if v < 10 else 16
+        if 4 + bits_cont + 8 * len(datos) <= capacidad * 8:
+            break
+    else:
+        raise ValueError("texto demasiado largo para el QR")
+
+    # --- bits de datos
+    bits = []
+    def poner(valor, n):
+        bits.extend((valor >> i) & 1 for i in reversed(range(n)))
+    poner(0b0100, 4)
+    poner(len(datos), bits_cont)
+    for b in datos:
+        poner(b, 8)
+    poner(0, min(4, capacidad * 8 - len(bits)))
+    poner(0, (-len(bits)) % 8)
+    pad = 0xEC
+    while len(bits) < capacidad * 8:
+        poner(pad, 8)
+        pad ^= 0xEC ^ 0x11
+    cw = [int("".join(map(str, bits[i:i + 8])), 2) for i in range(0, len(bits), 8)]
+
+    # --- corrección de errores y entrelazado
+    nb, ecc = _QR_BLOQUES[v - 1], _QR_ECC[v - 1]
+    raw = _modulos_datos(v) // 8
+    cortos = nb - raw % nb
+    largo_corto = raw // nb
+    div = _rs_divisor(ecc)
+    bloques, k = [], 0
+    for i in range(nb):
+        dat = cw[k:k + largo_corto - ecc + (0 if i < cortos else 1)]
+        k += len(dat)
+        e = _rs_resto(dat, div)
+        if i < cortos:
+            dat.append(0)
+        bloques.append(dat + e)
+    final = []
+    for i in range(len(bloques[0])):
+        for j, bl in enumerate(bloques):
+            if i != largo_corto - ecc or j >= cortos:
+                final.append(bl[i])
+
+    # --- patrones fijos
+    t = v * 4 + 17
+    m = [[False] * t for _ in range(t)]
+    fn = [[False] * t for _ in range(t)]
+    def fijo(x, y, negro):
+        m[y][x] = negro
+        fn[y][x] = True
+    for i in range(t):
+        fijo(6, i, i % 2 == 0)
+        fijo(i, 6, i % 2 == 0)
+    for cx, cy in ((3, 3), (t - 4, 3), (3, t - 4)):
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                x, y = cx + dx, cy + dy
+                if 0 <= x < t and 0 <= y < t:
+                    fijo(x, y, max(abs(dx), abs(dy)) not in (2, 4))
+    if v > 1:
+        n = v // 7 + 2
+        paso_a = (v * 8 + n * 3 + 5) // (n * 4 - 4) * 2
+        pos = list(reversed([t - 7 - i * paso_a for i in range(n - 1)] + [6]))
+        for i in range(n):
+            for j in range(n):
+                if (i, j) in ((0, 0), (0, n - 1), (n - 1, 0)):
+                    continue
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        fijo(pos[i] + dx, pos[j] + dy, max(abs(dx), abs(dy)) != 1)
+
+    def formato(mascara):
+        d = (0 << 3) | mascara                       # nivel M = 00
+        r = d
+        for _ in range(10):
+            r = (r << 1) ^ ((r >> 9) * 0x537)
+        b = ((d << 10) | r) ^ 0x5412
+        bit = lambda i: (b >> i) & 1 == 1
+        for i in range(6):
+            fijo(8, i, bit(i))
+        fijo(8, 7, bit(6))
+        fijo(8, 8, bit(7))
+        fijo(7, 8, bit(8))
+        for i in range(9, 15):
+            fijo(14 - i, 8, bit(i))
+        for i in range(8):
+            fijo(t - 1 - i, 8, bit(i))
+        for i in range(8, 15):
+            fijo(8, t - 15 + i, bit(i))
+        fijo(8, t - 8, True)
+
+    formato(0)
+    if v >= 7:
+        r = v
+        for _ in range(12):
+            r = (r << 1) ^ ((r >> 11) * 0x1F25)
+        b = (v << 12) | r
+        for i in range(18):
+            x, y = t - 11 + i % 3, i // 3
+            fijo(x, y, (b >> i) & 1 == 1)
+            fijo(y, x, (b >> i) & 1 == 1)
+
+    # --- colocar los datos en zigzag
+    i = 0
+    for derecha in range(t - 1, 0, -2):
+        if derecha <= 6:
+            derecha -= 1
+        for vert in range(t):
+            for j in range(2):
+                x = derecha - j
+                y = (t - 1 - vert) if ((derecha + 1) & 2) == 0 else vert
+                if not fn[y][x] and i < len(final) * 8:
+                    m[y][x] = (final[i >> 3] >> (7 - (i & 7))) & 1 == 1
+                    i += 1
+
+    # --- máscara: se elige la de menor penalización
+    mascaras = [lambda x, y: (x + y) % 2 == 0, lambda x, y: y % 2 == 0, lambda x, y: x % 3 == 0,
+                lambda x, y: (x + y) % 3 == 0, lambda x, y: (x // 3 + y // 2) % 2 == 0,
+                lambda x, y: x * y % 2 + x * y % 3 == 0, lambda x, y: (x * y % 2 + x * y % 3) % 2 == 0,
+                lambda x, y: ((x + y) % 2 + x * y % 3) % 2 == 0]
+
+    def aplicar(k):
+        for y in range(t):
+            for x in range(t):
+                if not fn[y][x] and mascaras[k](x, y):
+                    m[y][x] = not m[y][x]
+
+    def penalizacion():
+        p = 0
+        for filas in (m, [list(c) for c in zip(*m)]):
+            for fila in filas:
+                n, ant = 0, None
+                for c in fila:
+                    if c == ant:
+                        n += 1
+                    else:
+                        if n >= 5:
+                            p += n - 2
+                        n, ant = 1, c
+                if n >= 5:
+                    p += n - 2
+        for y in range(t - 1):
+            for x in range(t - 1):
+                if m[y][x] == m[y][x + 1] == m[y + 1][x] == m[y + 1][x + 1]:
+                    p += 3
+        negros = sum(map(sum, m))
+        p += abs(negros * 20 - t * t * 10) // (t * t) * 10
+        return p
+
+    mejor, pen_min = 0, None
+    for k in range(8):
+        aplicar(k)
+        formato(k)
+        pk = penalizacion()
+        if pen_min is None or pk < pen_min:
+            mejor, pen_min = k, pk
+        aplicar(k)                                   # deshace la máscara
+    aplicar(mejor)
+    formato(mejor)
+    return m
+
+
+def imprimir_qr(matriz):
+    """Dibuja el QR en la terminal (2 filas por línea con medios bloques, negro sobre blanco)."""
+    borde = 4
+    t = len(matriz)
+    oscuro = lambda x, y: 0 <= x < t and 0 <= y < t and matriz[y][x]
+    rango = range(-borde, t + borde)
+    if sys.stdout.isatty() or os.environ.get("FORCE_COLOR"):
+        for y in range(-borde, t + borde, 2):
+            linea = ""
+            for x in rango:
+                fg = "30" if oscuro(x, y) else "97"
+                bg = "40" if oscuro(x, y + 1) else "107"
+                linea += f"\033[{fg};{bg}m▀"
+            print("\t" + linea + "\033[0m")
+    else:
+        for y in rango:
+            print("\t" + "".join("██" if oscuro(x, y) else "  " for x in rango))
+
+
+# ============================================================================
+# WEB EN GITHUB PAGES
+# ============================================================================
+def _git(*args):
+    try:
+        r = subprocess.run(["git", *args], capture_output=True, text=True, timeout=5,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def url_github_pages(nombre_html):
+    """Calcula https://USUARIO.github.io/REPO/carpeta/fichero a partir del repositorio git."""
+    remoto = _git("config", "--get", "remote.origin.url")
+    m = re.search(r"github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$", remoto)
+    if not m:
+        return ""
+    usuario, repo = m.group(1), m.group(2)
+    prefijo = _git("rev-parse", "--show-prefix")
+    base = f"https://{usuario.lower()}.github.io/"
+    if repo.lower() != f"{usuario.lower()}.github.io":
+        base += quote(repo) + "/"
+    return base + quote(prefijo + nombre_html)
+
+
+def elegir_modo():
+    """Devuelve '1' (pantalla), '2' (móvil) o '3' (solo terminal). Solo acepta esas opciones."""
+    print("\t  [1] Pantalla: abrir el informe en el navegador de este ordenador")
+    print("\t  [2] Móvil: mostrar un código QR para abrir la web desde el móvil")
+    print("\t  [3] Nada: quedarme solo con la terminal")
+    while True:
+        try:
+            r = input(cian("\t¿Cómo quieres ver el informe? (1/2/3): ")).strip()
+        except EOFError:
+            print()
+            return "3"
+        if r in ("1", "2", "3"):
+            return r
+        print(rojo("\tOpción no válida: escribe 1, 2 o 3."))
+
+
 def abrir_navegador(ruta):
     """Abre el informe. En Linux sin escritorio no lo intenta (evita navegadores de texto)."""
     if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
@@ -736,6 +1022,7 @@ def main():
     ap.add_argument("--no-abrir", action="store_true", help="no abre el navegador")
     ap.add_argument("--sin-web", action="store_true", help="no genera el informe HTML")
     ap.add_argument("--sin-color", action="store_true", help="desactiva los colores ANSI")
+    ap.add_argument("--url", default="", help="dirección de la web en GitHub Pages (para el QR)")
     args = ap.parse_args()
 
     # Rutas pasadas a mano: relativas a donde se ejecuta. Rutas por defecto: carpeta del programa
@@ -813,11 +1100,34 @@ def main():
 
     # ---- PASO 5 (al final, para que el navegador no se mezcle con las preguntas)
     if html_ok and not args.no_abrir:
-        paso(5, "Abrir el informe")
-        if abrir_navegador(args.html):
-            print(verde("\t✔ Abierto en el navegador."))
+        paso(5, "Ver el informe gráfico")
+        modo = elegir_modo()
+        nombre_html = os.path.basename(args.html)
+        if modo == "1":
+            if abrir_navegador(args.html):
+                print(verde("\t✔ Abierto en el navegador."))
+            else:
+                print(amarillo(f"\tNo he podido abrir el navegador: abre a mano {nombre_html}"))
+        elif modo == "2":
+            url = args.url or URL_WEB or url_github_pages(nombre_html)
+            if not url:
+                print(amarillo("\tNo sé la dirección de la web: esta carpeta no está en un repositorio de GitHub."))
+                print(amarillo("\tIndícala con --url https://... o en la variable URL_WEB del programa."))
+            else:
+                try:
+                    qr = generar_qr(url)
+                except ValueError:
+                    qr = None
+                    print(amarillo("\tLa dirección es demasiado larga para el código QR."))
+                print()
+                if qr:
+                    imprimir_qr(qr)
+                print()
+                print(negrita(f"\tEscanéalo con la cámara del móvil o abre: {url}"))
+                print(gris("\tLa web muestra la última versión subida a GitHub. Si los datos han cambiado,"))
+                print(gris(f"\tsube {nombre_html} con git add, git commit y git push."))
         else:
-            print(amarillo(f"\tNo he podido abrir el navegador: abre a mano {os.path.basename(args.html)}"))
+            print(gris("\tDe acuerdo: solo terminal."))
     print()
 
 
