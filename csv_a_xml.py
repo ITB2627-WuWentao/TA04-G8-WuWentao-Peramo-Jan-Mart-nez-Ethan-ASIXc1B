@@ -3,24 +3,34 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 import xml.dom.minidom
+import signal
+
+# Ctrl+C en cualquier momento: sortida neta, sense traceback
+signal.signal(signal.SIGINT, lambda *_: sys.exit("\nCancel·lat per l'usuari."))
+# Treballa sempre a la carpeta del programa (funciona encara que s'executi des d'una altra carpeta)
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 FITXER_CSV = "incidencies.csv"
 FITXER_XML = "incidencies.xml"
 CAMPS = ["data", "reportat_per", "departament", "planta", "equip",
          "tipus", "prioritat", "descripcio", "usuaris_afectats", "causa"]
 
-if not os.path.exists(FITXER_CSV):
+if not os.path.isfile(FITXER_CSV):
     sys.exit("No trobo el fitxer " + FITXER_CSV)
 
-# Si el XML ja existeix, preguntem abans de tocar-lo
+# Si el XML ja existeix, preguntem abans de tocar-lo (només s'accepta s o n)
 if os.path.exists(FITXER_XML):
     print("El fitxer", FITXER_XML, "ja existeix.")
-    try:
-        resposta = input("Vols sobreescriure'l? (s/n): ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        sys.exit("\nCancel·lat: no s'ha modificat res.")
-    if resposta not in ("s", "si", "sí", "y", "yes"):
-        sys.exit("No s'ha modificat res. Es conserva l'XML existent.")
+    while True:
+        try:
+            resposta = input("Vols sobreescriure'l? (s/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            sys.exit("\nCancel·lat: no s'ha modificat res.")
+        if resposta == "s":
+            break
+        if resposta == "n":
+            sys.exit("No s'ha modificat res. Es conserva l'XML existent.")
+        print("Opció no vàlida: escriu s o n.")
 
 arrel = ET.Element("incidencies")
 
@@ -28,9 +38,11 @@ try:
     with open(FITXER_CSV, newline="", encoding="utf-8") as f:
         lector = csv.reader(f)
         try:
-            next(lector)                      # salta la fila de cabeceras
+            capcalera = next(lector)          # salta la fila de cabeceras
         except StopIteration:
             sys.exit("El fitxer " + FITXER_CSV + " està buit.")
+        if len(capcalera) < 11:
+            sys.exit("El fitxer " + FITXER_CSV + " no té el format esperat (calen 11 columnes).")
         for num, fila in enumerate(lector, start=1):
             if not any(c.strip() for c in fila):
                 continue                      # salta filas vacias

@@ -1,6 +1,19 @@
 {
-  "total": 9970,
+  "total": 9977,
   "incidencies": [
+    {
+      "id": "G8-0001",
+      "data": "2026-11-12",
+      "reportat_per": "Núria Roca",
+      "departament": "Docència",
+      "planta": "Pis 1",
+      "equip": "Càmera",
+      "tipus": "Xarxa",
+      "prioritat": 5,
+      "descripcio": "La imatge de la càmera va a salts i amb molt retard. Cal revisar-ho amb urgència.",
+      "usuaris_afectats": "Entre 6 i 20",
+      "causa": "Problema de xarxa o corrent elèctric"
+    },
     {
       "id": "G8-0003",
       "data": "2026-10-02",
@@ -27380,6 +27393,19 @@
       "causa": "Problema de xarxa o corrent elèctric"
     },
     {
+      "id": "G8-2417",
+      "data": "2026-11-13",
+      "reportat_per": "Marc Soler",
+      "departament": "Administració",
+      "planta": "Pis 3",
+      "equip": "Ordinador",
+      "tipus": "Maquinari",
+      "prioritat": 4,
+      "descripcio": "El PC va molt lent i es bloqueja en obrir programes. Cal revisar-ho amb urgència.",
+      "usuaris_afectats": "Entre 2 i 5",
+      "causa": "Error de usuari"
+    },
+    {
       "id": "G8-2418",
       "data": "2026-10-03",
       "reportat_per": "Jordi Mas",
@@ -54511,6 +54537,19 @@
       "causa": "Desconeguda"
     },
     {
+      "id": "G8-4821",
+      "data": "2026-11-13",
+      "reportat_per": "Gusi Lu",
+      "departament": "Informàtica",
+      "planta": "Piso 3",
+      "equip": "Switch",
+      "tipus": "Maquinari",
+      "prioritat": 9,
+      "descripcio": "El nostre commutador principal de fa de 50 anys s'acaba d'espatllar.",
+      "usuaris_afectats": "Més de 20",
+      "causa": "Desgast o avaria de maquinari"
+    },
+    {
       "id": "G8-4822",
       "data": "2026-10-16",
       "reportat_per": "Judit Bosch",
@@ -61216,6 +61255,19 @@
       "prioritat": 8,
       "descripcio": "Apareix una pantalla blava cada cop que s'inicia sessió. Cal revisar-ho amb urgència.",
       "usuaris_afectats": "Més de 20",
+      "causa": "Desconeguda"
+    },
+    {
+      "id": "G8-5417",
+      "data": "2026-11-11",
+      "reportat_per": "Mireia Font",
+      "departament": "Informàtica",
+      "planta": "Pis 2",
+      "equip": "Càmera",
+      "tipus": "Programari",
+      "prioritat": 2,
+      "descripcio": "La videoconferència no detecta la càmera connectada. Cal revisar-ho amb urgència.",
+      "usuaris_afectats": "Només 1",
       "causa": "Desconeguda"
     },
     {
@@ -106693,6 +106745,19 @@
       "causa": "Error de configuració"
     },
     {
+      "id": "G8-9440",
+      "data": "2026-11-12",
+      "reportat_per": "Mireia Font",
+      "departament": "Administració",
+      "planta": "Pis 2",
+      "equip": "Ordinador",
+      "tipus": "Programari",
+      "prioritat": 7,
+      "descripcio": "Apareix una pantalla blava cada cop que s'inicia sessió. Cal revisar-ho amb urgència.",
+      "usuaris_afectats": "Entre 2 i 5",
+      "causa": "Error de configuració"
+    },
+    {
       "id": "G8-9441",
       "data": "2026-10-24",
       "reportat_per": "Eric Martí",
@@ -107432,6 +107497,19 @@
       "descripcio": "No imprimeix cap document i la cua queda bloquejada. Cal revisar-ho amb urgència.",
       "usuaris_afectats": "Entre 6 i 20",
       "causa": "Error de usuari"
+    },
+    {
+      "id": "G8-9507",
+      "data": "2026-11-13",
+      "reportat_per": "Núria Roca",
+      "departament": "Docència",
+      "planta": "Pis 4",
+      "equip": "Impressora",
+      "tipus": "Programari",
+      "prioritat": 7,
+      "descripcio": "La impressora encasqueta el paper contínuament. Cal revisar-ho amb urgència.",
+      "usuaris_afectats": "Només 1",
+      "causa": "Error de configuració"
     },
     {
       "id": "G8-9508",
@@ -129090,6 +129168,19 @@
       "descripcio": "L'ordinador no arrenca després d'apagar-lo ahir. Cal revisar-ho amb urgència.",
       "usuaris_afectats": "Només 1",
       "causa": "Desgast o avaria de maquinari"
+    },
+    {
+      "id": "G8-11414",
+      "data": "2026-11-11",
+      "reportat_per": "Mireia Font",
+      "departament": "Informàtica",
+      "planta": "Pis 3",
+      "equip": "Càmera",
+      "tipus": "Programari",
+      "prioritat": 8,
+      "descripcio": "La videoconferència no detecta la càmera connectada. Cal revisar-ho amb urgència.",
+      "usuaris_afectats": "Només 1",
+      "causa": "Error de configuració"
     },
     {
       "id": "G8-11416",
